@@ -13,16 +13,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AkshareProvider:
-    """Free data provider backed by AKShare, SSE and Eastmoney public endpoints.
+    """Free provider backed by AKShare, Sina and official SSE share data.
 
-    Historical ETF shares are available by date from the Shanghai Stock Exchange.
-    For that reason the free provider deliberately supports an SSE-only ETF universe.
+    Sina supplies index and ETF market history. Shanghai Stock Exchange supplies
+    historical clearing shares by date. ETF close prices are used as a documented
+    NAV proxy when estimating flow amounts; the strategy signal itself uses the
+    share-change ratio and therefore does not depend on this price proxy.
     """
 
     request_interval_seconds: float = 0.20
-    max_attempts: int = 4
+    max_attempts: int = 5
     _trading_dates: list[pd.Timestamp] = field(default_factory=list, init=False)
     _sse_scale_by_date: dict[str, pd.DataFrame] = field(default_factory=dict, init=False)
+    _fund_daily_by_code: dict[str, pd.DataFrame] = field(default_factory=dict, init=False)
 
     def _call(self, name: str, function: Callable[[], pd.DataFrame]) -> pd.DataFrame:
         last_error: Exception | None = None
@@ -33,39 +36,63 @@ class AkshareProvider:
                 return frame if frame is not None else pd.DataFrame()
             except Exception as exc:  # public websites expose varying exception types
                 last_error = exc
-                time.sleep((attempt + 1) * 1.5)
+                delay = min(12.0, (attempt + 1) * 2.0)
+                logger.warning(
+                    "AKShare call %s failed on attempt %s/%s: %s",
+                    name,
+                    attempt + 1,
+                    self.max_attempts,
+                    exc,
+                )
+                time.sleep(delay)
         raise RuntimeError(f"AKShare call failed: {name}: {last_error}") from last_error
 
     @staticmethod
     def _plain_code(code: str) -> str:
         return code.split(".", maxsplit=1)[0]
 
+    @classmethod
+    def _market_symbol(cls, code: str) -> str:
+        plain = cls._plain_code(code)
+        if code.endswith(".SZ"):
+            return f"sz{plain}"
+        return f"sh{plain}"
+
     @staticmethod
     def _index_symbol(code: str) -> str:
         aliases = {
-            "000300.SH": "csi000300",
-            "000905.SH": "csi000905",
-            "000852.SH": "csi000852",
+            "000300.SH": "sh000300",
+            "000905.SH": "sh000905",
+            "000852.SH": "sh000852",
             "000016.SH": "sh000016",
             "000688.SH": "sh000688",
+            "399006.SZ": "sz399006",
         }
         if code in aliases:
             return aliases[code]
         base, _, exchange = code.partition(".")
-        if exchange == "SZ":
-            return f"sz{base}"
-        if exchange == "SH":
-            return f"sh{base}"
-        return code.lower()
+        prefix = "sz" if exchange == "SZ" else "sh"
+        return f"{prefix}{base}"
+
+    @staticmethod
+    def _filter_dates(
+        frame: pd.DataFrame,
+        date_column: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        if frame.empty or date_column not in frame.columns:
+            return frame
+        frame = frame.copy()
+        frame[date_column] = pd.to_datetime(frame[date_column], errors="coerce")
+        left = pd.to_datetime(start_date)
+        right = pd.to_datetime(end_date)
+        return frame[frame[date_column].between(left, right, inclusive="both")].copy()
 
     def fetch_index_daily(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         frame = self._call(
-            "stock_zh_index_daily_em",
-            lambda: ak.stock_zh_index_daily_em(
-                symbol=self._index_symbol(code),
-                start_date=start_date,
-                end_date=end_date,
-            ),
+            "stock_zh_index_daily",
+            lambda: ak.stock_zh_index_daily(symbol=self._index_symbol(code)),
         )
         if frame.empty:
             return pd.DataFrame(
@@ -82,33 +109,21 @@ class AkshareProvider:
                     "amount",
                 ]
             )
-        frame = frame.rename(
-            columns={
-                "date": "trade_date",
-                "volume": "vol",
-            }
-        )
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame = frame.rename(columns={"date": "trade_date", "volume": "vol"})
+        frame = self._filter_dates(frame, "trade_date", start_date, end_date)
         frame = frame.sort_values("trade_date")
-        frame["pre_close"] = pd.to_numeric(frame["close"], errors="coerce").shift(1)
-        frame["pct_chg"] = (
-            pd.to_numeric(frame["close"], errors="coerce") / frame["pre_close"] - 1.0
-        ) * 100.0
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame["pre_close"] = frame["close"].shift(1)
+        frame["pct_chg"] = (frame["close"] / frame["pre_close"] - 1.0) * 100.0
+        frame["amount"] = pd.NA
         frame["ts_code"] = code
         self._trading_dates = frame["trade_date"].dropna().tolist()
         return frame
 
     def fetch_fund_daily(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        plain = self._plain_code(code)
         frame = self._call(
-            "fund_etf_hist_em",
-            lambda: ak.fund_etf_hist_em(
-                symbol=plain,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust="",
-            ),
+            "fund_etf_hist_sina",
+            lambda: ak.fund_etf_hist_sina(symbol=self._market_symbol(code)),
         )
         if frame.empty:
             return pd.DataFrame(
@@ -125,22 +140,15 @@ class AkshareProvider:
                     "amount",
                 ]
             )
-        frame = frame.rename(
-            columns={
-                "日期": "trade_date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "vol",
-                "成交额": "amount",
-                "涨跌幅": "pct_chg",
-            }
-        )
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame = frame.rename(columns={"date": "trade_date", "volume": "vol"})
+        frame = self._filter_dates(frame, "trade_date", start_date, end_date)
         frame = frame.sort_values("trade_date")
-        frame["pre_close"] = pd.to_numeric(frame["close"], errors="coerce").shift(1)
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame["pre_close"] = frame["close"].shift(1)
+        frame["pct_chg"] = (frame["close"] / frame["pre_close"] - 1.0) * 100.0
+        frame["amount"] = pd.NA
         frame["ts_code"] = code
+        self._fund_daily_by_code[code] = frame.copy()
         return frame
 
     def _load_sse_scale_date(self, trade_date: str) -> pd.DataFrame:
@@ -164,15 +172,15 @@ class AkshareProvider:
             )
             frame["plain_code"] = frame["plain_code"].astype(str).str.zfill(6)
             frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+            # The SSE scale table is expressed in ten-thousand shares. flow.py
+            # converts this value into individual shares before calculations.
             frame["fd_share"] = pd.to_numeric(frame["fd_share"], errors="coerce")
         self._sse_scale_by_date[trade_date] = frame
         return frame
 
     def fetch_fund_share(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         if not code.endswith(".SH"):
-            raise ValueError(
-                f"AKShare free historical share mode supports SSE ETFs only: {code}"
-            )
+            raise ValueError(f"AKShare SSE share mode supports Shanghai ETFs only: {code}")
         left = pd.to_datetime(start_date)
         right = pd.to_datetime(end_date)
         trading_dates = [
@@ -192,28 +200,24 @@ class AkshareProvider:
         return selected[["ts_code", "trade_date", "fd_share"]]
 
     def fetch_fund_nav(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        plain = self._plain_code(code)
-        frame = self._call(
-            "fund_etf_fund_info_em",
-            lambda: ak.fund_etf_fund_info_em(
-                fund=plain,
-                start_date=start_date,
-                end_date=end_date,
-            ),
-        )
-        if frame.empty:
+        # Free public NAV endpoints may share the same cloud-IP restrictions as
+        # Eastmoney. The previous market close is an auditable proxy for the
+        # monetary flow display; flow_ratio and trade signals remain share-based.
+        daily = self._fund_daily_by_code.get(code)
+        if daily is None:
+            daily = self.fetch_fund_daily(code, start_date, end_date)
+        if daily.empty:
             return pd.DataFrame(
                 columns=["ts_code", "ann_date", "nav_date", "unit_nav", "accum_nav"]
             )
-        frame = frame.rename(
-            columns={
-                "净值日期": "nav_date",
-                "单位净值": "unit_nav",
-                "累计净值": "accum_nav",
-            }
-        )
-        frame["nav_date"] = pd.to_datetime(frame["nav_date"], errors="coerce")
+        frame = daily[["trade_date", "close"]].copy()
+        frame = self._filter_dates(frame, "trade_date", start_date, end_date)
+        frame = frame.rename(columns={"trade_date": "nav_date", "close": "unit_nav"})
         frame["unit_nav"] = pd.to_numeric(frame["unit_nav"], errors="coerce")
         frame["ann_date"] = frame["nav_date"]
+        frame["accum_nav"] = pd.NA
         frame["ts_code"] = code
-        return frame[["ts_code", "ann_date", "nav_date", "unit_nav", "accum_nav"]]
+        frame["nav_source"] = "market_close_proxy"
+        return frame[
+            ["ts_code", "ann_date", "nav_date", "unit_nav", "accum_nav", "nav_source"]
+        ]
