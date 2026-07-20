@@ -1,0 +1,42 @@
+name: Monitor main ETF deployment
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Follow latest main deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Monitoring the isolated main-branch deployment"
+          for attempt in $(seq 1 180); do
+            payload=$(gh api "/repos/${GH_REPO}/actions/workflows/daily-analysis.yml/runs?branch=main&event=push&per_page=1")
+            count=$(jq -r '.total_count' <<<"$payload")
+            if [ "$count" = "0" ]; then
+              echo "No main deployment run registered yet"
+              sleep 30
+              continue
+            fi
+            run_id=$(jq -r '.workflow_runs[0].id' <<<"$payload")
+            status=$(jq -r '.workflow_runs[0].status' <<<"$payload")
+            conclusion=$(jq -r '.workflow_runs[0].conclusion // ""' <<<"$payload")
+            html_url=$(jq -r '.workflow_runs[0].html_url' <<<"$payload")
+            echo "run_id=$run_id status=$status conclusion=$conclusion url=$html_url"
+            if [ "$status" = "completed" ]; then
+              [ "$conclusion" = "success" ]
+              exit
+            fi
+            sleep 30
+          done
+          echo "Deployment monitor timed out" >&2
+          exit 1
