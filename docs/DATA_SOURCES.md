@@ -1,96 +1,98 @@
 # 数据获取方案
 
-## 1. 推荐主源：Tushare Pro
+## 1. 默认免费数据源
 
-MVP 使用 Tushare Pro，原因是同一套接口可以取得以下关键数据：
+项目默认使用 `provider: akshare`，不需要账号、Token 或付费积分。AKShare 负责调用公开数据接口并统一为 DataFrame，实际来源如下：
 
-| 数据 | 接口 | 用途 |
-|---|---|---|
-| 指数日线 | `index_daily` | 计算沪深 300 等指数当日涨跌 |
-| 场内基金日线 | `fund_daily` | 计算可交易 ETF 的开盘价、收盘价和交易净值 |
-| 基金份额 | `fund_share` | 计算 ETF 真实净申购/净赎回 |
-| 公募基金净值 | `fund_nav` | 将份额变化换算成估算资金金额 |
-| ETF 基础信息 | `etf_basic` | 后续自动维护样本池 |
+| 数据 | AKShare 接口 | 实际来源 | 用途 |
+|---|---|---|---|
+| 指数日线 | `stock_zh_index_daily_em` | 东方财富 | 计算沪深 300 涨跌和事件研究 |
+| ETF 日线 | `fund_etf_hist_em` | 东方财富 | 模拟开盘买入、收盘估值和基准收益 |
+| ETF 历史份额 | `fund_etf_scale_sse` | 上海证券交易所 | 计算一级市场净申购、净赎回 |
+| ETF 历史净值 | `fund_etf_fund_info_em` | 天天基金/东方财富 | 将份额变化换算为估算资金金额 |
 
-环境变量：
-
-```bash
-export TUSHARE_TOKEN="你的 Token"
-```
-
-Windows PowerShell：
-
-```powershell
-$env:TUSHARE_TOKEN="你的 Token"
-```
-
-执行：
+安装项目后直接执行：
 
 ```bash
-etf-flow download --config configs/strategy.example.yaml
+etf-flow refresh --config configs/strategy.example.yaml --lookback-days 21
 ```
 
-注意：`fund_share`、`fund_nav`、`fund_daily` 和 `index_daily` 需要相应积分或权限。项目不会绕过供应商权限。
+首次运行会从配置的 `start_date` 开始逐交易日获取上交所 ETF 份额；后续使用本地或 GitHub Actions Cache，只刷新最近 21 个自然日。
 
-## 2. 官方核验源：上交所、深交所和基金公司
+## 2. 为什么默认只使用上交所 ETF
 
-交易所的 ETF 申购赎回清单适合用于核验当日 PCF、单位净值和公告时间，但不建议在 MVP 中直接把网页抓取作为唯一历史数据源：页面结构可能变化，历史文件格式也可能跨产品不一致。
+AKShare 的上交所接口允许传入日期，并返回该日期全部 ETF 的基金份额，因此可以重建历史份额序列。
 
-建议将官方数据用于三件事：
-
-1. 随机抽样核验 Tushare 的基金份额与净值；
-2. 核实数据在真实交易日的公布时点；
-3. 在重要异常流入日保存公告原件，形成可审计证据。
-
-## 3. 免费备用源：AKShare
-
-AKShare 适合补充 ETF 和指数历史行情，但它主要聚合公开网页数据。对于本策略最关键的“历史基金份额”字段，覆盖与稳定性需要逐接口验证，因此当前只建议作为行情备份，不作为资金流主源。
-
-## 4. 手工 CSV 兜底格式
-
-当没有 Tushare 权限时，可按以下格式准备文件。目录结构为 `data/manual/<dataset>/<code>.csv`，然后执行 `etf-flow import-csv --source data/manual` 转换为项目使用的 Parquet：
-
-### `fund_share`
-
-```csv
-ts_code,trade_date,fd_share
-510300.SH,20260105,123456.78
-```
-
-`fd_share` 单位为万份。
-
-### `fund_nav`
-
-```csv
-ts_code,ann_date,nav_date,unit_nav
-510300.SH,20260106,20260105,4.1234
-```
-
-### `fund_daily`
-
-```csv
-ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount
-510300.SH,20260105,4.10,4.15,4.08,4.12,4.09,0.7335,1000000,412000
-```
-
-### `index_daily`
-
-```csv
-ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount
-000300.SH,20260105,3900,3940,3880,3920,3890,0.7712,100000000,200000000
-```
-
-## 5. 资金流计算口径
-
-项目使用：
+深交所免费接口目前返回最近交易日快照，没有等价的历史日期参数。为了避免将当前份额错误填充到历史日期，免费样本池只保留 `.SH` ETF：
 
 ```text
-净申购金额 = 当日份额变化 × 前一日单位净值
-净申购率   = 当日份额变化 ÷ 前一日基金份额
+510050.SH  上证50 ETF
+510300.SH  沪深300 ETF
+510500.SH  中证500 ETF
+512100.SH  中证1000 ETF
+588000.SH  科创50 ETF
 ```
 
-这里使用的是 ETF 一级市场份额变化，不是行情软件根据主动买卖盘估算的“主力资金净流入”。两者不可混用。
+这会损失创业板等深市 ETF 信息，但比使用不可验证的历史估算更可靠。将来若获得可靠的深交所历史份额源，可通过新的 provider 接入。
 
-## 6. 时间可用性
+## 3. 请求次数、缓存和失败策略
 
-`trade_date=T` 不等于数据在 T 日收盘前可用。默认策略把 T 日信号延迟两个交易日，在 T+2 开盘执行。正式研究还应保存每个字段的 `ann_date` 或抓取时间，并比较 T+1、T+2、T+3 三种执行假设。
+上交所份额接口是“一个日期返回全部 ETF”，项目会在同一次运行中缓存日期结果，不会为每只 ETF 重复请求同一天。
+
+- 首次从 2020 年开始构建时，需要按交易日发送较多请求；
+- 后续增量刷新通常只查询最近十几个交易日；
+- 公开网站请求采用串行、间隔和指数退避，不进行高并发抓取；
+- 单日多次失败会跳过该日并记录警告；如果有效数据不足，分析阶段会失败，而不是把旧页面伪装成最新结果；
+- `data/raw` 不提交到 Git，使用本地目录或 Actions Cache 保存。
+
+## 4. 资金流计算口径
+
+```text
+净申购金额 = (当日基金份额 - 前一日基金份额) × 前一日单位净值
+净申购率   = (当日基金份额 - 前一日基金份额) ÷ 前一日基金份额
+```
+
+上交所返回的基金份额单位为万份，程序会转换成实际份数后再计算金额。
+
+这里研究的是 ETF 一级市场份额变化，不是行情软件根据主动买卖盘估算的二级市场“主力资金净流入”。
+
+## 5. 时间可用性
+
+交易所页面注明基金规模是当日清算后的统计数据。`trade_date=T` 不代表该数据在 T 日收盘前已经可用，因此：
+
+- GitHub 定时任务安排在下一工作日上午运行；
+- 回测仍将 T 日信号延迟两个交易日，在 T+2 开盘执行；
+- 最新页面可能比行情日期晚一个自然日生成，这是有意的数据完整性设计。
+
+## 6. 可选 Tushare 支持
+
+原有 Tushare provider 保留为可选项，但默认不会安装或调用。需要时执行：
+
+```bash
+pip install -e ".[tushare]"
+```
+
+然后在配置中改为：
+
+```yaml
+provider: tushare
+```
+
+并设置 `TUSHARE_TOKEN`。免费模式不需要执行这些步骤。
+
+## 7. 手工 CSV 兜底
+
+仍可将授权数据放入 `data/manual/<dataset>/<code>.csv`，再执行：
+
+```bash
+etf-flow import-csv --source data/manual --config configs/strategy.example.yaml
+```
+
+基础字段：
+
+```text
+fund_share:  ts_code,trade_date,fd_share
+fund_nav:    ts_code,ann_date,nav_date,unit_nav
+fund_daily:  ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount
+index_daily: ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount
+```
