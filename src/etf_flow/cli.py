@@ -9,7 +9,7 @@ from rich.table import Table
 from .config import load_config
 from .csv_import import import_manual_csv
 from .pipeline import download_all, refresh_all
-from .providers import TushareProvider
+from .providers import build_provider
 from .runner import run_research
 
 app = typer.Typer(help="A-share ETF flow strategy research toolkit")
@@ -27,9 +27,11 @@ def _show_metrics(title: str, metrics: dict[str, float]) -> None:
 
 def _provider(config_path: Path):
     cfg = load_config(config_path)
-    if cfg.provider != "tushare":
-        raise typer.BadParameter("the current automatic pipeline supports provider=tushare")
-    return cfg, TushareProvider()
+    try:
+        provider = build_provider(cfg.provider)
+    except (RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return cfg, provider
 
 
 def _show_result(result: dict[str, object]) -> None:
