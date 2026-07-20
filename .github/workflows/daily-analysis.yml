@@ -3,6 +3,7 @@ name: Daily ETF analysis
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
   schedule:
     # Public SSE share data is a clearing result. Run after the next business
