@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import json
 
+from .analysis import (
+    build_event_study,
+    build_latest_snapshot,
+    build_recent_signals,
+    build_signal_history,
+    write_analysis_outputs,
+)
 from .backtest import build_buy_hold, run_long_only_backtest
 from .config import AppConfig
 from .flow import build_flow_dataset
@@ -34,26 +41,56 @@ def run_research(config: AppConfig) -> dict[str, object]:
     strategy_metrics = summarize(result.equity, result.trades)
     benchmark_metrics = summarize(benchmark)
 
+    event_study = build_event_study(signals)
+    recent_market = build_recent_signals(signals)
+    signal_history = build_signal_history(signals)
+    snapshot = build_latest_snapshot(
+        signals,
+        strategy_metrics,
+        benchmark_metrics,
+        config,
+    )
+    analysis_paths = write_analysis_outputs(
+        config.paths.report_dir,
+        snapshot,
+        event_study,
+        recent_market,
+        signal_history,
+    )
+
     report_path = generate_html_report(
         signals,
         result.equity,
         benchmark,
         strategy_metrics,
         benchmark_metrics,
-        config.paths.report_dir / "backtest.html",
+        config.paths.report_dir / "index.html",
+        snapshot=snapshot,
+        event_study=event_study,
+        recent_market=recent_market,
+        signal_history=signal_history,
     )
+    legacy_report = config.paths.report_dir / "backtest.html"
+    legacy_report.write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
+
     metrics_path = config.paths.report_dir / "metrics.json"
     metrics_path.write_text(
         json.dumps(
-            {"strategy": strategy_metrics, "buy_hold": benchmark_metrics},
+            {
+                "strategy": snapshot["strategy"],
+                "buy_hold": snapshot["buy_hold"],
+            },
             ensure_ascii=False,
             indent=2,
+            allow_nan=False,
         ),
         encoding="utf-8",
     )
     return {
         "report": report_path,
         "metrics": metrics_path,
+        "analysis": analysis_paths,
+        "snapshot": snapshot,
         "strategy": strategy_metrics,
         "buy_hold": benchmark_metrics,
     }

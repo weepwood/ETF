@@ -6,9 +6,12 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 
+_site/
 data/raw/
 data/processed/
 reports/*.html
 reports/*.png
+reports/*.json
+reports/*.csv
 !data/manual/.gitkeep
 !reports/.gitkeep

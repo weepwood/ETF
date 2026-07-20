@@ -8,7 +8,7 @@ from rich.table import Table
 
 from .config import load_config
 from .csv_import import import_manual_csv
-from .pipeline import download_all
+from .pipeline import download_all, refresh_all
 from .providers import TushareProvider
 from .runner import run_research
 
@@ -25,14 +25,42 @@ def _show_metrics(title: str, metrics: dict[str, float]) -> None:
     console.print(table)
 
 
+def _provider(config_path: Path):
+    cfg = load_config(config_path)
+    if cfg.provider != "tushare":
+        raise typer.BadParameter("the current automatic pipeline supports provider=tushare")
+    return cfg, TushareProvider()
+
+
+def _show_result(result: dict[str, object]) -> None:
+    _show_metrics("Strategy", result["strategy"])
+    _show_metrics("Buy & hold", result["buy_hold"])
+    snapshot = result["snapshot"]
+    console.print(
+        f"Latest: {snapshot['latest_trade_date']} | {snapshot['status']} | "
+        f"flow_z={snapshot['flow_z']}"
+    )
+    console.print(f"Dashboard: {result['report']}")
+
+
 @app.command()
 def download(config: Path = typer.Option(Path("configs/strategy.example.yaml"))) -> None:
-    """Download index, ETF price, fund-share and NAV datasets."""
-    cfg = load_config(config)
-    if cfg.provider != "tushare":
-        raise typer.BadParameter("the MVP currently supports provider=tushare")
-    written = download_all(cfg, TushareProvider())
+    """Download the complete configured history, replacing the raw cache."""
+    cfg, provider = _provider(config)
+    written = download_all(cfg, provider)
     console.print(f"Downloaded {len(written)} datasets into {cfg.paths.raw_dir}")
+
+
+@app.command()
+def refresh(
+    config: Path = typer.Option(Path("configs/strategy.example.yaml")),
+    lookback_days: int = typer.Option(21, min=1, max=365),
+) -> None:
+    """Incrementally refresh data, analyze it and rebuild the dashboard."""
+    cfg, provider = _provider(config)
+    written = refresh_all(cfg, provider, lookback_days=lookback_days)
+    console.print(f"Refreshed {len(written)} datasets into {cfg.paths.raw_dir}")
+    _show_result(run_research(cfg))
 
 
 @app.command("import-csv")
@@ -48,24 +76,19 @@ def import_csv(
 
 @app.command()
 def backtest(config: Path = typer.Option(Path("configs/strategy.example.yaml"))) -> None:
-    """Build ETF flows, generate signals and run the backtest."""
-    result = run_research(load_config(config))
-    _show_metrics("Strategy", result["strategy"])
-    _show_metrics("Buy & hold", result["buy_hold"])
-    console.print(f"HTML report: {result['report']}")
+    """Analyze existing data and rebuild all reports without downloading."""
+    _show_result(run_research(load_config(config)))
 
 
 @app.command()
-def run(config: Path = typer.Option(Path("configs/strategy.example.yaml"))) -> None:
-    """Download data and run the complete research pipeline."""
-    cfg = load_config(config)
-    if cfg.provider != "tushare":
-        raise typer.BadParameter("the MVP currently supports provider=tushare")
-    download_all(cfg, TushareProvider())
-    result = run_research(cfg)
-    _show_metrics("Strategy", result["strategy"])
-    _show_metrics("Buy & hold", result["buy_hold"])
-    console.print(f"HTML report: {result['report']}")
+def run(
+    config: Path = typer.Option(Path("configs/strategy.example.yaml")),
+    lookback_days: int = typer.Option(21, min=1, max=365),
+) -> None:
+    """Alias for refresh: update data, analyze and rebuild the dashboard."""
+    cfg, provider = _provider(config)
+    refresh_all(cfg, provider, lookback_days=lookback_days)
+    _show_result(run_research(cfg))
 
 
 if __name__ == "__main__":
