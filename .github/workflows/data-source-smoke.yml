@@ -17,9 +17,10 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e .
-      - name: Query Sina and SSE
+      - name: Query Sina and SSE history
         run: |
           python - <<'PY'
+          import time
           import akshare as ak
 
           index = ak.stock_zh_index_daily(symbol="sh000300")
@@ -28,7 +29,10 @@ jobs:
           etf = ak.fund_etf_hist_sina(symbol="sh510300")
           print("SINA_ETF", len(etf), etf.tail(1).to_dict("records"))
 
-          shares = ak.fund_etf_scale_sse(date="20260717")
-          selected = shares[shares["基金代码"].astype(str).str.zfill(6) == "510300"]
-          print("SSE_SHARE", len(shares), selected.to_dict("records"))
+          for date in ("20200102", "20220104", "20260717"):
+              started = time.perf_counter()
+              shares = ak.fund_etf_scale_sse(date=date)
+              selected = shares[shares["基金代码"].astype(str).str.zfill(6) == "510300"]
+              elapsed = time.perf_counter() - started
+              print("SSE_SHARE", date, round(elapsed, 3), len(shares), selected.to_dict("records"))
           PY
