@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Callable
 
 import akshare as ak
@@ -21,11 +23,13 @@ class AkshareProvider:
     share-change ratio and therefore does not depend on this price proxy.
     """
 
-    request_interval_seconds: float = 0.20
+    request_interval_seconds: float = 0.10
     max_attempts: int = 5
+    share_download_workers: int = 4
     _trading_dates: list[pd.Timestamp] = field(default_factory=list, init=False)
     _sse_scale_by_date: dict[str, pd.DataFrame] = field(default_factory=dict, init=False)
     _fund_daily_by_code: dict[str, pd.DataFrame] = field(default_factory=dict, init=False)
+    _cache_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def _call(self, name: str, function: Callable[[], pd.DataFrame]) -> pd.DataFrame:
         last_error: Exception | None = None
@@ -152,8 +156,10 @@ class AkshareProvider:
         return frame
 
     def _load_sse_scale_date(self, trade_date: str) -> pd.DataFrame:
-        if trade_date in self._sse_scale_by_date:
-            return self._sse_scale_by_date[trade_date]
+        with self._cache_lock:
+            cached = self._sse_scale_by_date.get(trade_date)
+        if cached is not None:
+            return cached
         try:
             frame = self._call(
                 "fund_etf_scale_sse",
@@ -175,8 +181,30 @@ class AkshareProvider:
             # The SSE scale table is expressed in ten-thousand shares. flow.py
             # converts this value into individual shares before calculations.
             frame["fd_share"] = pd.to_numeric(frame["fd_share"], errors="coerce")
-        self._sse_scale_by_date[trade_date] = frame
+        with self._cache_lock:
+            self._sse_scale_by_date[trade_date] = frame
         return frame
+
+    def _prefetch_sse_scale_dates(self, trading_dates: list[pd.Timestamp]) -> None:
+        date_keys = [day.strftime("%Y%m%d") for day in trading_dates]
+        with self._cache_lock:
+            missing = [key for key in date_keys if key not in self._sse_scale_by_date]
+        if not missing:
+            return
+
+        logger.info(
+            "Downloading %s SSE ETF share dates with %s workers",
+            len(missing),
+            self.share_download_workers,
+        )
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max(1, self.share_download_workers)) as executor:
+            futures = {executor.submit(self._load_sse_scale_date, key): key for key in missing}
+            for future in as_completed(futures):
+                future.result()
+                completed += 1
+                if completed % 100 == 0 or completed == len(missing):
+                    logger.info("SSE ETF share progress: %s/%s dates", completed, len(missing))
 
     def fetch_fund_share(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         if not code.endswith(".SH"):
@@ -189,7 +217,12 @@ class AkshareProvider:
         if not trading_dates:
             trading_dates = list(pd.bdate_range(left, right))
 
-        frames = [self._load_sse_scale_date(day.strftime("%Y%m%d")) for day in trading_dates]
+        self._prefetch_sse_scale_dates(trading_dates)
+        frames = [
+            self._sse_scale_by_date[day.strftime("%Y%m%d")]
+            for day in trading_dates
+            if day.strftime("%Y%m%d") in self._sse_scale_by_date
+        ]
         frames = [frame for frame in frames if not frame.empty]
         if not frames:
             return pd.DataFrame(columns=["ts_code", "trade_date", "fd_share"])
