@@ -1,0 +1,38 @@
+provider: akshare
+start_date: "20200101"
+end_date: null
+
+# Signal benchmark and actually traded ETF.
+index_code: "000300.SH"
+trade_etf_code: "510300.SH"
+
+# Free historical ETF-share data is queried by date from the Shanghai Stock
+# Exchange. Keep this universe SSE-only; Shenzhen currently exposes only the
+# latest share snapshot through the free AKShare wrapper.
+universe:
+  - "510050.SH"  # SSE 50
+  - "510300.SH"  # CSI 300
+  - "510500.SH"  # CSI 500
+  - "512100.SH"  # CSI 1000
+  - "588000.SH"  # STAR 50
+
+signal:
+  index_drop_threshold: -0.01
+  flow_z_threshold: 1.0
+  rolling_window: 60
+  min_periods: 20
+  min_coverage: 0.60
+
+execution:
+  # Signal from day T is executed at the open after two trading sessions.
+  # This remains conservative because public share data is a clearing result,
+  # not information guaranteed to be available before the close of T.
+  signal_delay_days: 2
+  hold_days: 5
+  fee_bps_each_side: 3.0
+  initial_cash: 1000000.0
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  report_dir: reports

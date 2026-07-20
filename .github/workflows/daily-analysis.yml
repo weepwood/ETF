@@ -1,0 +1,91 @@
+name: Daily ETF analysis
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Public SSE share data is a clearing result. Run after the next business
+    # morning update: 01:35 UTC = 09:35 China / 10:35 Japan.
+    - cron: "35 1 * * 1-5"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: etf-daily-analysis
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Restore rolling raw-data cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: etf-free-raw-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            etf-free-raw-${{ runner.os }}-
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Refresh free data and build analysis
+        run: etf-flow refresh --config configs/strategy.example.yaml --lookback-days 21
+
+      - name: Verify generated outputs
+        run: |
+          test -s reports/index.html
+          test -s reports/latest.json
+          test -s reports/metrics.json
+          test -s reports/event_study.csv
+          pytest -q
+
+      - name: Prepare static site
+        run: |
+          mkdir -p _site
+          cp reports/index.html _site/index.html
+          cp reports/*.json _site/
+          cp reports/*.csv _site/
+          touch _site/.nojekyll
+
+      - name: Upload analysis files
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-analysis-${{ github.run_number }}
+          path: |
+            reports/
+            data/processed/
+          retention-days: 30
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
