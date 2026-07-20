@@ -7,7 +7,7 @@ import pandas as pd
 
 from .config import AppConfig
 from .io import normalize_dates, read_table, write_table
-from .providers import TushareProvider
+from .providers import MarketDataProvider
 
 
 def _clean(frame: pd.DataFrame, date_column: str) -> pd.DataFrame:
@@ -48,14 +48,14 @@ def _incremental_start(
     return min(end_date, max(configured_start, candidate))
 
 
-def download_all(config: AppConfig, provider: TushareProvider) -> list[Path]:
+def download_all(config: AppConfig, provider: MarketDataProvider) -> list[Path]:
     """Download the complete configured history and replace local raw datasets."""
     return _download(config, provider, incremental=False, lookback_days=0)
 
 
 def refresh_all(
     config: AppConfig,
-    provider: TushareProvider,
+    provider: MarketDataProvider,
     lookback_days: int = 21,
 ) -> list[Path]:
     """Refresh only recent observations while retaining the local historical cache."""
@@ -64,7 +64,7 @@ def refresh_all(
 
 def _download(
     config: AppConfig,
-    provider: TushareProvider,
+    provider: MarketDataProvider,
     incremental: bool,
     lookback_days: int,
 ) -> list[Path]:
