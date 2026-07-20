@@ -1,6 +1,8 @@
 name: Daily ETF analysis
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # Public SSE share data is a clearing result. Run after the next business
@@ -73,6 +75,8 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
